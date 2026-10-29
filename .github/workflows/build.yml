@@ -1,0 +1,91 @@
+# FREQMAN: build APK & AAB otomatis, lalu terbitkan di Releases.
+# Simpan berkas ini di repository sebagai:  .github/workflows/build.yml
+name: Build FREQMAN
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-freqman
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      # Unggahan dari HP: FREQMAN-kotlin.zip diekstrak, isinya disimpan ke repository, zip-nya dihapus.
+      - name: Ekstrak FREQMAN-kotlin.zip (bila ada)
+        run: |
+          if [ -f FREQMAN-kotlin.zip ]; then
+            unzip -o -q FREQMAN-kotlin.zip -d .
+            git rm -q --cached FREQMAN-kotlin.zip || true
+            rm -f FREQMAN-kotlin.zip
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -q -m "Perbarui sumber dari FREQMAN-kotlin.zip" || echo "Tidak ada perubahan"
+            git push -q || echo "Push dilewati"
+          fi
+
+      - name: Pasang Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Pasang Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Pasang Android SDK 36
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0" > /dev/null
+
+      - name: Siapkan kunci tanda tangan
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then echo "::error::Secret KEYSTORE_BASE64 belum diisi"; exit 1; fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/freqman-release.jks"
+          echo "FREQMAN_KEYSTORE=$RUNNER_TEMP/freqman-release.jks" >> "$GITHUB_ENV"
+
+      - name: Build APK & AAB
+        env:
+          FREQMAN_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          FREQMAN_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          FREQMAN_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle --no-daemon :app:assembleRelease :app:bundleRelease
+
+      - name: Siapkan berkas rilis
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/FREQMAN-v1.0-build${{ github.run_number }}.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "dist/FREQMAN-v1.0-build${{ github.run_number }}.aab"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs dist/*.apk | tee dist/signature.txt
+
+      - name: Simpan sebagai artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FREQMAN-build${{ github.run_number }}
+          path: dist/
+
+      - name: Terbitkan di Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: FREQMAN 1.0 (build ${{ github.run_number }})
+          body: |
+            APK untuk dipasang langsung di HP, AAB untuk Google Play.
+            Ditandatangani dengan kunci FREQMAN (lihat signature.txt, SHA-256 harus 91:A9:F7:A0:…:E6:ED).
+          files: |
+            dist/*.apk
+            dist/*.aab
+            dist/signature.txt
